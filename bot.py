@@ -91,7 +91,8 @@ df_BTC_FNG.to_csv(completeData, index=False)
 #---------- Split data into training and testing
 #Drop date since scaler.fit cannot handle strings, could do some conversions but date doesn't matter anyways
 df_BTC_FNG = df_BTC_FNG.drop(['date'], axis=1)
-split = int(0.95 * len(df_BTC_FNG))
+df_BTC_FNG = df_BTC_FNG[int(len(df_BTC_FNG)*0.75):]
+split = int(0.97 * len(df_BTC_FNG))
 train = df_BTC_FNG.iloc[:split]
 test = df_BTC_FNG.iloc[split:]
 
@@ -104,7 +105,7 @@ scaled_test = scaler.transform(test)
 
 from keras.preprocessing.sequence import TimeseriesGenerator
 #Define timeseries generator
-n_size = 24
+n_size = 32
 n_features = 6
 generator = TimeseriesGenerator(scaled_train, scaled_train, length=n_size, batch_size=1)
 
@@ -121,18 +122,51 @@ from keras.layers import LSTM
 
 model = Sequential()
 model.add(LSTM(100, activation='relu', input_shape=(n_size, n_features)))
-model.add(Dense(1))
+model.add(Dense(6))
 model.compile(optimizer='adam', loss='mse')
 
-model.fit(generator, epochs=100)
+model.fit(generator, epochs=5)
 
 test_predictions = []
 first_eval_batch = scaled_train[-n_size:]
 current_batch = first_eval_batch.reshape((1, n_size, n_features))
 
-for i in range(len(test)):
+for i in scaled_test:
   current_pred = model.predict(current_batch)[0]
   test_predictions.append(current_pred)
-  current_batch = np.append(current_batch[:,1:,:], [[current_pred]], axis=1)
+  current_actual = np.array(i)
+  current_batch = np.append(current_batch[:,1:,:], [[current_actual]], axis=1)
 
-print(test_predictions)
+true_predictions = scaler.inverse_transform(test_predictions)
+count = 0
+cum_inaccuracy = 0
+overestimations = 0
+cum_overestimation_inaccuracy = 0
+underestimations = 0
+cum_underestimation_inaccuracy = 0
+cum_change = 0
+
+for i in test['close']:
+  print(str(i) + " v.s. Prediction " + str(true_predictions[count][3]))
+  if i > true_predictions[count][3]:
+    underestimations += 1
+    cum_underestimation_inaccuracy += abs(i - true_predictions[count][3]) / i
+  elif i < true_predictions[count][3]:
+    overestimations += 1
+    cum_overestimation_inaccuracy += abs(i - true_predictions[count][3]) / i
+  cum_inaccuracy += abs(i - true_predictions[count][3]) / i
+  if count > 0:
+    cum_change += abs(test['close'].iloc[count-1] - true_predictions[count][3])
+  count += 1
+
+change = cum_change / (count-1)
+inaccuracy = cum_inaccuracy / count
+overestimation_inaccuracy = cum_overestimation_inaccuracy / overestimations
+underestimation_inaccuracy = cum_underestimation_inaccuracy / underestimations
+
+print("Total inaccuracy is " + str(inaccuracy*100) + "%")
+print("Number of overesimations is " + str(overestimations))
+print("Total inaccuracy of overestimations is " + str(overestimation_inaccuracy*100) + "%")
+print("Number of underestimations is " + str(underestimations))
+print("Total inaccuracy of underestimations is " + str(underestimation_inaccuracy*100) + "%")
+print("Average predicted change is " + str(change))
