@@ -75,14 +75,64 @@ df_BTC = df_BTC.iloc[::-1]
 df_BTC.dropna(inplace=True)
 
 #---------- Combine BTCUSDT data and FNG data, then make csv file
-
+#export DISPLAY=localhost:0.0
 df_BTC_FNG = pd.merge(df_BTC, df_FNG, on="date")
 df_BTC_FNG = df_BTC_FNG.drop_duplicates()
 df_BTC_FNG.dropna(inplace=True)
 completeData = "BTC_FNG.csv"
 df_BTC_FNG.to_csv(completeData, index=False)
 
-df_BTC_FNG.plot()
+#Show open and close data, then fng
+#df_BTC_FNG[['open','close']].plot()
+#plt.show()
+#df_BTC_FNG[['fng_value']].plot()
+#plt.show()
 
+#---------- Split data into training and testing
+#Drop date since scaler.fit cannot handle strings, could do some conversions but date doesn't matter anyways
+df_BTC_FNG = df_BTC_FNG.drop(['date'], axis=1)
+split = int(0.95 * len(df_BTC_FNG))
+train = df_BTC_FNG.iloc[:split]
+test = df_BTC_FNG.iloc[split:]
 
+from sklearn.preprocessing import MinMaxScaler
 
+scaler = MinMaxScaler()
+scaler.fit(train)
+scaled_train = scaler.transform(train)
+scaled_test = scaler.transform(test)
+
+from keras.preprocessing.sequence import TimeseriesGenerator
+#Define timeseries generator
+n_size = 24
+n_features = 6
+generator = TimeseriesGenerator(scaled_train, scaled_train, length=n_size, batch_size=1)
+
+#Example test
+#X,y = generator[0]
+#print(f'Given the array: \n{X.flatten()}')
+#print(f'Predict this y: \n {y}')
+#print(X.shape)
+
+#Now to define the model
+from keras.models import Sequential
+from keras.layers import Dense
+from keras.layers import LSTM
+
+model = Sequential()
+model.add(LSTM(100, activation='relu', input_shape=(n_size, n_features)))
+model.add(Dense(1))
+model.compile(optimizer='adam', loss='mse')
+
+model.fit(generator, epochs=100)
+
+test_predictions = []
+first_eval_batch = scaled_train[-n_size:]
+current_batch = first_eval_batch.reshape((1, n_size, n_features))
+
+for i in range(len(test)):
+  current_pred = model.predict(current_batch)[0]
+  test_predictions.append(current_pred)
+  current_batch = np.append(current_batch[:,1:,:], [[current_pred]], axis=1)
+
+print(test_predictions)
