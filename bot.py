@@ -49,8 +49,6 @@ df_FNG = pd.read_csv(filename2)
 df_FNG = df_FNG.iloc[::-1]
 df_FNG.dropna(inplace=True)
 
-print(df_FNG)
-
 #---------- Read BTC/USDT historical hourly data, remove some columns and reverse dataframe
 filename = "/mnt/d/trading-bot/trading-bot/Binance_BTCUSDT_1h.csv"
 newfilename = "/mnt/d/trading-bot/trading-bot/BTCUSDTH.csv"
@@ -75,9 +73,14 @@ with open(filename, "r") as read_obj:
 df_BTC = pd.read_csv(newfilename)
 df_BTC = df_BTC.iloc[::-1]
 df_BTC.dropna(inplace=True)
-print(df_BTC)
 
-#---------- Combine BTCUSDT data and FNG data 
+#---------- Combine BTCUSDT data and FNG data, then make csv file
 
 df_BTC_FNG = pd.merge(df_BTC, df_FNG, on="date")
-print(df_BTC_FNG)
+df_BTC_FNG = df_BTC_FNG.drop_duplicates()
+df_BTC_FNG = df_BTC_FNG.dropna(inplace=True)
+completeData = "BTC_FNG.csv"
+df_BTC_FNG.to_csv(completeData, index=False)
+
+
+
