@@ -105,7 +105,7 @@ scaled_test = scaler.transform(test)
 
 from keras.preprocessing.sequence import TimeseriesGenerator
 #Define timeseries generator
-n_size = 32
+n_size = 96
 n_features = 6
 generator = TimeseriesGenerator(scaled_train, scaled_train, length=n_size, batch_size=1)
 
@@ -125,7 +125,7 @@ model.add(LSTM(100, activation='relu', input_shape=(n_size, n_features)))
 model.add(Dense(6))
 model.compile(optimizer='adam', loss='mse')
 
-model.fit(generator, epochs=5)
+model.fit(generator, epochs=3)
 
 test_predictions = []
 first_eval_batch = scaled_train[-n_size:]
@@ -144,10 +144,21 @@ overestimations = 0
 cum_overestimation_inaccuracy = 0
 underestimations = 0
 cum_underestimation_inaccuracy = 0
-cum_change = 0
+cum_prediction_change = 0
+leverage = 5
+money = 1000
+cum_price_change = 0
 
+#Do simulation of trading
 for i in test['close']:
-  print(str(i) + " v.s. Prediction " + str(true_predictions[count][3]))
+  if count == (len(test['close']) - 1):
+    print("PREDICTION FOR NEXT HOUR:")
+    print("Close: " + str(true_predictions[count][3]))
+    print("High: " + str(true_predictions[count][1]))
+    print("Low: " + str(true_predictions[count][2]))
+    print("Volume " + str(true_predictions[count][4]))
+  else:
+    print(str(i) + " v.s. Prediction " + str(true_predictions[count][3]))
   if i > true_predictions[count][3]:
     underestimations += 1
     cum_underestimation_inaccuracy += abs(i - true_predictions[count][3]) / i
@@ -156,10 +167,24 @@ for i in test['close']:
     cum_overestimation_inaccuracy += abs(i - true_predictions[count][3]) / i
   cum_inaccuracy += abs(i - true_predictions[count][3]) / i
   if count > 0:
-    cum_change += abs(test['close'].iloc[count-1] - true_predictions[count][3])
+    cum_prediction_change += abs(test['close'].iloc[count-1] - true_predictions[count][3])
+    cum_price_change += abs(test['close'].iloc[count-1] - test['close'].iloc[count])
+    # If last close is less than the prediction
+    if test['close'].iloc[count-1] < true_predictions[count][3]:
+      # Would have longed
+      percent_change = i/test['close'].iloc[count-1]
+      amplified_change = 1 + ((percent_change - 1) * leverage)
+      money = money * amplified_change
+    # Else if last close is more than the prediction
+    elif test['close'].iloc[count-1] > true_predictions[count][3]:
+      # Would have shorted
+      percent_change = test['close'].iloc[count-1]/i
+      amplified_change = 1 + ((percent_change - 1) * leverage)
+      money = money * amplified_change
   count += 1
 
-change = cum_change / (count-1)
+prediction_change = cum_prediction_change / (count-1)
+price_change = cum_price_change / (count-1)
 inaccuracy = cum_inaccuracy / count
 overestimation_inaccuracy = cum_overestimation_inaccuracy / overestimations
 underestimation_inaccuracy = cum_underestimation_inaccuracy / underestimations
@@ -169,4 +194,6 @@ print("Number of overesimations is " + str(overestimations))
 print("Total inaccuracy of overestimations is " + str(overestimation_inaccuracy*100) + "%")
 print("Number of underestimations is " + str(underestimations))
 print("Total inaccuracy of underestimations is " + str(underestimation_inaccuracy*100) + "%")
-print("Average predicted change is " + str(change))
+print("Average predicted change is " + str(prediction_change))
+print("Average actual change is " + str(price_change))
+print("Ending money " + str(money) + " after " + str(count/24) + " days")
