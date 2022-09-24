@@ -1,6 +1,6 @@
 # trading-bot
 
-This is a work in progress. The aim of the project is to assess to what extent the stock market and asset prices are predictable with a ML approach.
+This is a work in progress. The aim of the project is to assess to what extent the stock market and asset prices are predictable with an ML approach.
 Specifically, an RNN is used for time-series analysis.
 
 Currently the predictions are done on Bitcoin, because it is easy to find hourly Bitcoin price data dating as far back as 2018.
