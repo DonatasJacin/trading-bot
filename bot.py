@@ -93,7 +93,10 @@ df_BTC_FNG.to_csv(completeData, index=False)
 #---------- Split data into training and testing
 #Drop date since scaler.fit cannot handle strings, could do some conversions but date doesn't matter anyways
 df_BTC_FNG = df_BTC_FNG.drop(['date'], axis=1)
-split = int(0.99 * len(df_BTC_FNG))
+#Here we reduce the size of the dataset to prevent overfitting - which was observed when the entire dataset was used
+reduce = int(0.90 * len(df_BTC_FNG))
+df_BTC_FNG = df_BTC_FNG.iloc[reduce:]
+split = int(0.995 * len(df_BTC_FNG))
 train = df_BTC_FNG.iloc[:split]
 test = df_BTC_FNG.iloc[split:]
 
@@ -106,7 +109,7 @@ scaled_test = scaler.transform(test)
 
 from keras.preprocessing.sequence import TimeseriesGenerator
 #Define timeseries generator
-n_size = 32
+n_size = 64
 n_features = 6
 generator = TimeseriesGenerator(scaled_train, scaled_train, length=n_size, batch_size=1)
 
@@ -126,7 +129,7 @@ model.add(LSTM(100, activation='tanh', input_shape=(n_size, n_features)))
 model.add(Dense(6))
 model.compile(optimizer='adam', loss='mse')
 
-model.fit(generator, epochs=2)
+model.fit(generator, epochs=10)
 
 test_predictions = []
 first_eval_batch = scaled_train[-n_size:]
