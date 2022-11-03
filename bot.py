@@ -81,7 +81,7 @@ df_BTC.dropna(inplace=True)
 df_BTC_FNG = pd.merge(df_BTC, df_FNG, on="date")
 df_BTC_FNG = df_BTC_FNG.drop_duplicates()
 df_BTC_FNG.dropna(inplace=True)
-completeData = "BTC_FNG.csv"
+completeData = "BTC_FNG_Hourly.csv"
 df_BTC_FNG.to_csv(completeData, index=False)
 
 #Show open and close data, then fng
