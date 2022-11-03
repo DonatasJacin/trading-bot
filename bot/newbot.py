@@ -3,32 +3,36 @@ import csv
 from csv import DictReader
 import pandas as pd
 import numpy as np
+import os.path
+
+os.chdir("/home/donatas/Desktop/github-repos/trading-bot/data/")
 
 # Loads up-to-date FNG figures into "FNG_Daily.csv"
 def LoadFNG():
     #Obtain FNG index data from API
     url = "https://api.alternative.me/fng/?limit=2000&format=csv&date_format=kr"
     response = requests.get(url)
-    jsontext = response.text
+    json_text = response.text
     index = 0
     dataStartFound = False
 
     #Turn JSON response into csv
-    for char in jsontext:
+    for char in json_text:
         if char == ']':
             dataEnd = index
             break
         if char == '2' and dataStartFound == False:
             dataStart = index - 1
             dataStartFound = True
-    index += 1
+        index += 1
 
-    jsontext = 'date,fng_value,fng_classification' + jsontext[dataStart:dataEnd]
+    json_text = 'date,fng_value,fng_classification' + json_text[dataStart:dataEnd]
 
-    filename = "FNG_Daily.csv"
+    file_name = "FNG_Daily.csv"
 
-    with open(filename, "w") as f:
-        f.write(jsontext)
+    with open(file_name, "w") as f:
+        f.write(json_text)
+        return 1
 
 # Combines datasets for price data, FNG, and macroeconomic variables
 def CombineDatasets():
@@ -51,6 +55,5 @@ def CombineDatasets():
     Combined_df = Combined_df.rename(columns = {'volume USDT': 'volume', 'fng_value': 'fng'})
 
     Combined_df.to_csv('Combined.csv', index=False)
+    return 1
 
-
-CombineDatasets()
