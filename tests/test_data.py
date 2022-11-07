@@ -1,6 +1,9 @@
 import os.path
 from os.path import exists
-from solution.solution import LoadFNG, PrepareCPI, CombineDatasets
+from solution.solution import LoadFNG, PrepareCPI, CombineDatasets, PrepareFed, GetDataset, ReshapeData
+import numpy
+import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
 
 os.chdir("/home/donatas/Desktop/github-repos/asset-predictor/data/")
 
@@ -14,6 +17,22 @@ def test_LoadFNG():
 def test_PrepareCPI():
     assert (PrepareCPI() == 1) and exists("CPIU_Daily.csv")
 
+def test_PrepareFed():
+    assert (PrepareFed() == 1) and exists("FEDFunds_Daily.csv")
+
 def test_CombineDatasets():
     assert (CombineDatasets() == 1) and exists("Combined.csv")
 
+def test_GetDataset():
+    assert (type(GetDataset()) == pd.DataFrame)
+
+def test_ReshapeData():
+    Combined_df = GetDataset()
+    Combined_df = Combined_df.drop(['date'], axis = 1)
+    ratio = 0.95
+    split = round(len(Combined_df) * ratio)
+    train = Combined_df[:split]
+    scaler = MinMaxScaler()
+    scaler = scaler.fit(train)
+    scaled_train = scaler.transform(train)
+    train_X, train_Y = ReshapeData(1, 30, train)

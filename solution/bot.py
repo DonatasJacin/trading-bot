@@ -129,7 +129,7 @@ model.add(LSTM(100, activation='tanh', input_shape=(n_size, n_features)))
 model.add(Dense(6))
 model.compile(optimizer='adam', loss='mse')
 
-model.fit(generator, epochs=10)
+model.fit(generator, epochs=1)
 
 test_predictions = []
 first_eval_batch = scaled_train[-n_size:]
@@ -142,6 +142,7 @@ for i in scaled_test:
   current_batch = np.append(current_batch[:,1:,:], [[current_actual]], axis=1)
 
 true_predictions = scaler.inverse_transform(test_predictions)
+print(true_predictions)
 count = 0
 cum_inaccuracy = 0
 overestimations = 0
