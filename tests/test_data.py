@@ -15,10 +15,10 @@ def test_LoadFNG():
     assert (LoadFNG() == 1) and exists("FNG_Daily.csv")
 
 def test_PrepareCPI():
-    assert (PrepareCPI() == 1) and exists("CPIU_Daily.csv")
+    assert (PrepareCPI("constant") == 1) and (PrepareCPI("interpolate") == 1) and exists("CPIU_Daily.csv")
 
 def test_PrepareFed():
-    assert (PrepareFed() == 1) and exists("FEDFunds_Daily.csv")
+    assert (PrepareFed("constant") == 1) and (PrepareFed("interpolate") == 1) and exists("FEDFunds_Daily.csv")
 
 def test_CombineDatasets():
     assert (CombineDatasets() == 1) and exists("Combined.csv")
