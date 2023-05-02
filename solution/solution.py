@@ -8,15 +8,21 @@ from os.path import exists
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics import roc_curve, auc
-from keras.models import Sequential
+from keras.models import Sequential, Model
 from keras.layers import CuDNNLSTM
-from keras.layers import Dense, Dropout
+from keras.layers import Dense, Dropout, Input, LSTM, Dense, concatenate, CuDNNLSTM
+from keras.optimizers import Adam
+from keras.callbacks import EarlyStopping
 import tensorflow as tf
 from tensorflow import keras
 from keras import layers
 from keras import Model
 from keras.utils.vis_utils import plot_model
+from keras import backend as K
 from tabulate import tabulate
+import itertools
+from sklearn.metrics import precision_score, recall_score, f1_score
+from sklearn.feature_selection import RFE
 
 
 os.chdir("/home/donatas/Desktop/github-repos/asset-predictor/data/")
@@ -63,9 +69,9 @@ def LoadFNG(mode):
 # Upsamples monthly inflation data and interpolates, stores in "CPIU_Daily.csv"
 def PrepareCPI(mode):
     # Import monthly inflation data
-    CPIU_df = pd.read_csv("CPIU_Monthly.csv", parse_dates = ['date_of_publication'])
+    CPIU_df = pd.read_csv("CPIU_Monthly.csv", parse_dates = ['date'])
     CPIU_df = CPIU_df.drop(['month'], axis = 1)
-    CPIU_df = CPIU_df.set_index('date_of_publication')
+    CPIU_df = CPIU_df.set_index('date')
     if mode == "interpolate":
         CPIU_df = CPIU_df.resample('D').interpolate()
     elif mode == "constant":
@@ -122,7 +128,6 @@ def CombineDatasets():
     Fed_df['date'] = pd.to_datetime(Fed_df['date'])
 
     CPIU_df = pd.read_csv("CPIU_Daily.csv")
-    CPIU_df = CPIU_df.rename(columns = {'date_of_publication' : 'date'})
     CPIU_df['date'] = pd.to_datetime(CPIU_df['date'])
 
     # Merge datasets on date column
@@ -139,16 +144,15 @@ def CombineDatasets():
     Combined_df.to_csv('Combined.csv', index=False)
     return 1
 
-def GetDataset(reload):
+def GetDataset(reload, mode): #mode = constant or interpolate
     # Check if datasets have been prepared, if not, run corresponding functions
-    mode = "interpolate"
-    if not exists("FNG_Daily.csv") and reload == 1:
+    if not exists("FNG_Daily.csv") or reload == 1:
         LoadFNG(mode)
         reload = 1
-    if not exists("CPIU_Daily.csv") and reload == 1:
+    if not exists("CPIU_Daily.csv") or reload == 1:
         PrepareCPI(mode)
         reload = 1
-    if not exists("FEDFunds_Daily.csv") and reload == 1:
+    if not exists("FEDFunds_Daily.csv") or reload == 1:
         PrepareFed(mode)
         reload = 1
     if not exists("Combined.csv") or reload == 1:
@@ -196,151 +200,757 @@ def CreateLSTMModel(df, days_to_use, days_to_predict, ratio, prediction_param_in
     model = Model(input, lstm)
     return model, scaled_df, scaled_test_df, scaler, train_x, train_y
 
+def TradingSimulation(test, prediction_array, optimal_threshold, use_threshold):
 
-reload = 1
-Combined_df = GetDataset(reload)
-# Dates are extracted for plotting purposes
-dates = pd.to_datetime(Combined_df['date'])
-Combined_df = Combined_df.drop(['date'], axis = 1)
+    # CHECK THAT TEST AND PREDICTION ARRAY ARE THE SAME SIZE!!!!!!!
+    # MAKES SURE SIMULATION IS ACTUALLY DOING WHAT ITS SUPPOSED TO DO
 
-# Split data into training/validation and testing
-ratio = 0.95
-split = round(len(Combined_df) * ratio)
-train = Combined_df[:split]
-test = Combined_df[split:]
-test_labels = test['label']
+    print(len(test))
+    print(len(prediction_array))
 
-# Normalise dataset
-scaler = MinMaxScaler()
-scaler = scaler.fit(train)
-scaled_train = scaler.transform(train)
-scaled_test = scaler.transform(test)
+    count = 0
+    cum_inaccuracy = 0
+    overestimations = 0
+    cum_overestimation_inaccuracy = 0
+    underestimations = 0
+    cum_underestimation_inaccuracy = 0
+    cum_prediction_change = 0
+    leverage = 1
+
+    money_wfees_naive = 1000
+    money_wfees_naive_array = []
+    money_naive = 1000
+    money_naive_array = []
+    money_wfees_smart = 1000
+    money_wfees_smart_array = []
+    money_smart = 1000
+    money_smart_array = []
+    correct = 0
+    incorrect = 0
+
+    cum_price_change = 0
+    trades_executed_naive = 0
+    difference_threshold = 0.005
+    taker_fee = 0.0004
+    maker_fee = 0.0004
+    #taker_fee = 0.0005
+    #maker_fee = 0.0005
+
+    #Convert strings from test into np.float64
+    test = test.astype(np.float64)
+
+    #Do simulation of trading
+    for i in test['close']:
+        if count > 0:
+            trades_executed_naive += 1
+            # If last close is less than the prediction
+            #print(prediction_array[1][count])
+            #print(prediction_array[0][count])
+            #print(optimal_threshold)
+            if (prediction_array[1][count] > optimal_threshold and use_threshold == True) or (prediction_array[1][count] > 0.5 and use_threshold == False):
+                # Would have longed
+                print("Longing at index " + str(count))
+                percent_change = i/test['close'].iloc[count-1]
+                if percent_change >= 1:
+                    correct += 1
+                else:
+                    incorrect += 1
+                amplified_change = 1 + ((percent_change - 1) * leverage)
+                print("Last close: {:.3f}     Current Close: {:.3f}       % Change: {:.3f}".format(test['close'].iloc[count-1], i, amplified_change))
+                # No mathematical need to seperate multiplication with brackets, but makes it more readable
+                money_wfees_naive = money_wfees_naive - (money_wfees_naive * (taker_fee * leverage))
+                money_wfees_naive = money_wfees_naive - (money_wfees_naive * (maker_fee * leverage))
+                money_wfees_naive = money_wfees_naive * amplified_change
+                money_naive = money_naive * amplified_change
+                # Non-naive strategy - if the change is equal or greater than difference_threshold, long
+                #   if test['close'].iloc[count-1] <= true_predictions[count]*(1-difference_threshold):
+                #     money_wfees_smart = money_wfees_smart - (money_wfees_smart * (taker_fee * leverage))
+                #     money_wfees_smart = money_wfees_smart - (money_wfees_smart * (maker_fee * leverage))
+                #     money_wfees_smart = money_wfees_smart * amplified_change
+                #     money_smart = money_smart * amplified_change
+                # Else if last close is more than the prediction
+            #elif prediction_array[0][count] > optimal_threshold:
+            elif (prediction_array[1][count] < optimal_threshold and use_threshold == True) or (prediction_array[1][count] < 0.5 and use_threshold == False):
+                # Would have shorted
+                print("Shorting at index " + str(count))
+                percent_change = test['close'].iloc[count-1]/i
+                if percent_change >= 1:
+                    correct += 1
+                else:
+                    incorrect += 1
+                amplified_change = 1 + ((percent_change - 1) * leverage)
+                print("Last close: {:.3f}     Current Close: {:.3f}       % Change: {:.3f}".format(test['close'].iloc[count-1], i, amplified_change))
+                # No mathematical need to seperate multiplication with brackets, but makes it more readable
+                money_wfees_naive = money_wfees_naive - (money_wfees_naive * (maker_fee * leverage))
+                money_wfees_naive = money_wfees_naive - (money_wfees_naive * (taker_fee * leverage))
+                money_wfees_naive = money_wfees_naive * amplified_change
+                money_naive = money_naive * amplified_change
+                # Non-naive strategy - if the change is equal or greater than difference_threshold, short
+                #   if test['close'].iloc[count-1]*(1-difference_threshold) > true_predictions[count]: 
+                #     money_wfees_smart = money_wfees_smart - (money_wfees_smart * (maker_fee * leverage))
+                #     money_wfees_smart = money_wfees_smart - (money_wfees_smart * (taker_fee * leverage))
+                #     money_wfees_smart = money_wfees_smart * amplified_change
+                #     money_smart = money_smart * amplified_change
+            money_wfees_naive_array.append(money_wfees_naive)
+            money_naive_array.append(money_naive)
+            # money_wfees_smart_array.append(money_wfees_smart)
+            # money_smart_array.append(money_smart)
+        count += 1
+    return money_wfees_naive_array, correct, incorrect
+
+def PrepareDataForModel(Combined_df, days_to_use, label_index, remove_labels):
+    # Split data into training/validation and testing
+    ratio_train_testone = 0.9
+    ratio_testone_testtwo = 0.05
+    split_train_testone = round(len(Combined_df) * ratio_train_testone)
+    split_testone_testtwo = round(len(Combined_df) * (ratio_train_testone + ratio_testone_testtwo))
+    train = Combined_df[:split_train_testone]
+    test = Combined_df[split_train_testone:split_testone_testtwo]
+    test_labels = test['label']
+    final_test = Combined_df[split_testone_testtwo:]
+    final_test_labels = final_test['label']
+
+    # Normalise dataset
+    scaler = MinMaxScaler()
+    scaler = scaler.fit(train)
+    scaled_train = scaler.transform(train)
+    scaled_test = scaler.transform(test)
+    scaled_final_test = scaler.transform(final_test)
+
+    days_to_predict = 1
+
+    train_labels = []
+
+    for i in range(days_to_use, len(train) - days_to_predict + 1):
+        train_labels.append(train.iloc[i + days_to_predict - 1:i + days_to_predict, label_index])
+
+    train_labels = np.array(train_labels)
+    test_labels = np.array(test_labels)
+    final_test_labels = np.array(final_test_labels)
+
+    train_X, train_Y = ReshapeData(days_to_predict, days_to_use, label_index, scaled_train)
+    #print("scaled_df shape == {}.".format(scaled_train.shape))
+    #print("train_X shape == {}.".format(train_X.shape))
+    #print("train_Y shape == {}.".format(train_Y.shape))
+    #print("train_labels shape == {}.".format(train_labels.shape))
+
+    if remove_labels == True:
+        # Now remove labels from each day in each training sample
+        train_X = train_X[:, :, :-1]
+
+        scaled_train = scaled_train[:, :-1]
+        scaled_test = scaled_test[:, :-1]
+        scaled_final_test = scaled_final_test[:, :-1]
+
+    return train_X, train_labels, test_labels, final_test_labels, scaled_train, scaled_test, scaled_final_test, test, final_test
+
+def TrainModel(train_X, train_labels, test_labels, final_test_labels, scaled_train, scaled_test, scaled_final_test, LSTM_cells, dropout_rate, epochs, batch_size, iterations):
+
+    n_size = train_X.shape[1]
+    n_features = train_X.shape[2]
+
+    auc_sum = 0
+    precision_sum = 0
+    recall_sum = 0
+    f1_sum = 0
+    accuracies = []
+    val_accuracies = []
+    best_auc = 0
+    losses = []
+    val_losses = []
+    combined_prediction_array = []
+
+    optimal_thresholds = []
+
+    for i in range(iterations):
+        model = Sequential()
+        model.add(CuDNNLSTM(LSTM_cells, input_shape=(n_size, n_features), return_sequences=False)) # Can only use CuDNNLSTMs if GPU is enabled for tensorflow, default activation is tanh
+        #model.add(Dense(train_Y.shape[1]))
+        #model.add(Dense(128, activation = 'relu'))
+        model.add(Dropout(dropout_rate))
+        model.add(Dense(2, activation = 'softmax'))
+        plot_model(model, to_file='model_plot.png', show_shapes=True, show_layer_names=True)
+
+        #model.compile(optimizer='adam', loss='mse', metrics=['mse'])
+        model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+        model.summary()
+        history = model.fit(train_X, train_labels, epochs=epochs, batch_size=batch_size, validation_split=0.1, verbose=1)
+
+        test_predictions = []
+        first_eval_batch = scaled_train[-n_size:]
+        current_batch = first_eval_batch.reshape((1, n_size, n_features))
+
+        for i in scaled_test:
+            current_pred = model.predict(current_batch)[0]
+            test_predictions.append(current_pred)
+            current_actual = np.array(i)
+            current_batch = np.append(current_batch[:,1:,:], [[current_actual]], axis=1)
+
+        # only contains probabilities for positive class
+        test_predictions_positive = []
+        test_predictions_negative = []
+        for prediction in test_predictions:
+            test_predictions_negative.append(prediction[0])
+            test_predictions_positive.append(prediction[1])
+
+        fpr, tpr, thresholds = roc_curve(test_labels, test_predictions_positive)
+        roc_auc_test = auc(fpr, tpr)
+
+        # Calculate optimal threshold based on the ROC curve for first test set
+
+        optimal_i = np.argmax(tpr - fpr)
+        optimal_th = thresholds[optimal_i]
+        optimal_thresholds.append(optimal_th)
+
+        # Obtain predictions for final test set
+
+        final_test_predictions = []
+        first_eval_batch = scaled_test[-n_size:]
+        current_batch = first_eval_batch.reshape((1, n_size, n_features))
+
+        for i in scaled_final_test:
+            current_pred = model.predict(current_batch)[0]
+            final_test_predictions.append(current_pred)
+            current_actual = np.array(i)
+            current_batch = np.append(current_batch[:,1:,:], [[current_actual]], axis=1)
+
+        # only contains probabilities for positive class
+        
+        test_predictions_positive = []
+        test_predictions_negative = []
+        for prediction in final_test_predictions:
+            test_predictions_negative.append(prediction[0])
+            test_predictions_positive.append(prediction[1])
+        combined_prediction_array.append([test_predictions_negative, test_predictions_positive])
+
+        fpr_final, tpr_final, thresholds_final = roc_curve(final_test_labels, test_predictions_positive)
+        roc_auc = auc(fpr_final, tpr_final)
+        if roc_auc > best_auc:
+            best_auc = roc_auc
+
+        auc_sum += roc_auc
+        accuracies.append(history.history['accuracy'])
+        val_accuracies.append(history.history['val_accuracy'])
+        losses.append(history.history['loss'])
+        val_losses.append(history.history['val_loss'])
+
+        # Apply optimal threshold onto the final test set
+
+        binary_test_predictions_positive = []
+
+        for prediction in test_predictions_positive:
+            if prediction > optimal_th:
+                binary_test_predictions_positive.append(1)
+            else:
+                binary_test_predictions_positive.append(0)
+
+        # Calculate precision, recall, and F1 score
+        precision_sum += precision_score(final_test_labels, binary_test_predictions_positive)
+        recall_sum += recall_score(final_test_labels, binary_test_predictions_positive)
+        f1_sum += f1_score(final_test_labels, binary_test_predictions_positive)
+
+        plt.plot(fpr, tpr, label = 'Model (area = {:.3f}), Optimal Threshold {:.3f}'.format(roc_auc_test, optimal_th))
+        plt.plot(fpr_final, tpr_final, label = "Model (area = {:.3f})".format(roc_auc))
+
+    del model
+
+    K.clear_session()
+
+    average_auc = auc_sum / iterations
+    precision = precision_sum / iterations
+    recall = recall_sum / iterations
+    f1 = f1_sum / iterations
+
+    return average_auc, best_auc, combined_prediction_array, accuracies, val_accuracies, losses, val_losses, optimal_thresholds, precision, recall, f1
 
 
-days_to_predict = 1
-days_to_use = 45
+def PlotModelIterations(average_auc, best_auc, accuracies, val_accuracies, losses, val_losses, epochs):
+    print("Best AUC: {:.3f}".format(best_auc))
 
-train_labels = []
+    plt.plot([0,1], [0,1], 'k--', label = "No predictive power (area = 0.5)")
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('ROC Curve     average AUC = {:.3f}'.format(average_auc))
+    plt.legend(loc = 'best')
+    plt.show()
 
-for i in range(days_to_use, len(train) - days_to_predict + 1):
-    train_labels.append(train.iloc[i + days_to_predict - 1:i + days_to_predict, 8])
+    epoch_list = np.arange(0, epochs, 1, dtype=int)
 
-train_labels = np.array(train_labels)
-test_labels = np.array(test_labels)
+    count = 0
+    best_accuracy = []
+    for accuracy in accuracies:
+        if accuracy == best_accuracy:
+            plt.plot(epoch_list, accuracy, color = "black", label = "Highest AUC Accuracy")
+            plt.plot(epoch_list, val_accuracies[count], color = "green", label = "Highest AUC Validation Accuracy")
+        else:
+            plt.plot(epoch_list, accuracy, color = "blue")
+            plt.plot(epoch_list, val_accuracies[count], color = "red")
+        count += 1
 
-print(train_labels)
-print(test_labels)
+    plt.xlabel("Epoch")
+    plt.ylabel("Accuracy")
+    plt.title("Training (blue) and Validation (red) accuracy")
+    plt.show()
 
-train = train.drop(['label'], axis = 1)
-test = test.drop(['label'], axis = 1)
-train_X, train_Y = ReshapeData(days_to_predict, days_to_use, 3, scaled_train)
-print("scaled_df shape == {}.".format(scaled_train.shape))
-print("train_X shape == {}.".format(train_X.shape))
-print("train_Y shape == {}.".format(train_Y.shape))
-print("train_labels shape == {}.".format(train_labels.shape))
+    count = 0
+    for loss in losses:
+        plt.plot(epoch_list, loss, color = "blue")
+        plt.plot(epoch_list, val_losses[count], color = "red")
+        count += 1
 
-n_size = train_X.shape[1]
-n_features = train_X.shape[2]
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Training (blue) and Validation (red) loss")
+    plt.show()
 
-iterations = 5
-auc_sum = 0
-accuracies = []
-val_accuracies = []
-best_auc = 0
-losses = []
-val_losses = []
+def LSTMSolution(r_features):
 
-for i in range(iterations):
-    model = Sequential()
-    model.add(CuDNNLSTM(64, input_shape=(n_size, n_features), return_sequences=True)) # Can only use CuDNNLSTMs if GPU is enabled for tensorflow, default activation is tanh
-    #model.add(Dense(train_Y.shape[1]))
-    model.add(Dropout(0.4))
-    model.add(CuDNNLSTM(64, input_shape=(n_size, n_features), return_sequences=False))
-    model.add(Dropout(0.4))
-    model.add(Dense(64, activation = 'relu'))
-    model.add(Dropout(0.4))
-    model.add(Dense(2, activation = 'softmax'))
-    plot_model(model, to_file='model_plot.png', show_shapes=True, show_layer_names=True)
+    reload = 1
+    mode = "constant"
+    Combined_df = GetDataset(reload, mode)
 
-    #model.compile(optimizer='adam', loss='mse', metrics=['mse'])
-    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
-    model.summary()
-    epochs = 250
-    history = model.fit(train_X, train_labels, epochs=epochs, batch_size=8, validation_split=0.1, verbose=1)
+    # Dates are extracted for plotting purposes
+    dates = pd.to_datetime(Combined_df['date'])
+    Combined_df = Combined_df.drop(['date'], axis = 1)
+    Combined_df = Combined_df.drop(r_features, axis = 1)
 
-    test_predictions = []
-    first_eval_batch = scaled_train[-n_size:]
-    current_batch = first_eval_batch.reshape((1, n_size, n_features))
+    days_to_use_array = [7, 15, 28, 45, 80]
+    LSTM_cells_array = [64, 128, 256]
+    dropout_array = [0.2, 0.4]
+    epochs_array = [50, 100, 150]
+    batch_size_array = [8, 32]
 
-    for i in scaled_test:
-        current_pred = model.predict(current_batch)[0]
-        test_predictions.append(current_pred)
-        current_actual = np.array(i)
-        current_batch = np.append(current_batch[:,1:,:], [[current_actual]], axis=1)
+    hp_combinations = list(itertools.product(batch_size_array, epochs_array, dropout_array, LSTM_cells_array, days_to_use_array))
 
-    # only contains probabilities for positive class
-    test_predictions_positive = []
-    test_predictions_negative = []
-    for prediction in test_predictions:
-        test_predictions_negative.append(prediction[0])
-        test_predictions_positive.append(prediction[1])
+    hp_combinations_df = pd.DataFrame(hp_combinations, columns = ["Batch Size", "Epochs", "Dropout Rate", "LSTM Cells", "Days to Use"])
+    hp_combinations_df.to_csv("hp_combinations.csv")
+
+    # Print the number of hyperparameter combinations
+    print(f"Total number of hyperparameter combinations: {len(hp_combinations)}")
+
+    # Print the first 10 hyperparameter combinations
+    print("First 10 hyperparameter combinations:")
+    for combination in hp_combinations[:10]:
+        print(combination)
+
+    combination_metrics = pd.DataFrame(columns=["Average AUC", "Best AUC", "Average Return", "Average Accuracy", "Lost Money Count", "Best Return", "Worst Return", "Best Accuracy", "Worst Accuracy", "Return Range", "Accuracy Range"])
+
+    iterations = 40
+    combination_counter = 0
+    hp_combinations = [[32,150,0.4,128,45]]
+
+    for combination in hp_combinations:
+
+        print("--------------------------")
+        print("{} COMBINATION OUT OF {}".format(combination_counter, len(hp_combinations)))
+        print("--------------------------")
+        print("COMBINATION DETAILS:")
+        print("--------------------------")
+        print(combination)
+        print("--------------------------")
+
+        train_X, train_labels, test_labels, final_test_labels, scaled_train, scaled_test, scaled_final_test, test, final_test = PrepareDataForModel(Combined_df=Combined_df, days_to_use=combination[4], label_index=8 - len(r_features), remove_labels=False)
+
+        print(train_X[0])
+        print(train_labels[0])
+
+        average_auc, best_auc, combined_prediction_array, accuracies, val_accuracies, losses, val_losses, optimal_thresholds, precision, recall, f1 = TrainModel(train_X=train_X,
+                                                                                                                            train_labels=train_labels,
+                                                                                                                            test_labels=test_labels,
+                                                                                                                            final_test_labels=final_test_labels,
+                                                                                                                            scaled_train=scaled_train,
+                                                                                                                            scaled_test=scaled_test,
+                                                                                                                            scaled_final_test=scaled_final_test, 
+                                                                                                                            batch_size=combination[0],
+                                                                                                                            epochs=combination[1],
+                                                                                                                            dropout_rate=combination[2],
+                                                                                                                            LSTM_cells=combination[3],
+                                                                                                                            iterations=iterations)
+                                                                                                                            
+        
+        PlotModelIterations(average_auc=average_auc, best_auc=best_auc, accuracies=accuracies, val_accuracies=val_accuracies, losses=losses, val_losses=val_losses, epochs=combination[1])
+
+        total_return = 0
+        lost_count = 0
+        running_accuracy = 0
+        running_accuracy_noth = 0
+        total_return_noth = 0
+        best_return = 0
+        best_accuracy = 0
+        worst_return = 100000000000000
+        worst_accuracy = 100
+
+        for i in range(iterations):
+            money_wfees_naive_array, correct, incorrect = TradingSimulation(final_test, combined_prediction_array[i], optimal_thresholds[i], True)
+
+            test_accuracy = correct / (correct + incorrect)
+            running_accuracy += test_accuracy
+
+            if test_accuracy < worst_accuracy:
+                worst_accuracy = test_accuracy
+            if test_accuracy > best_accuracy:
+                best_accuracy = test_accuracy
+
+            print("Accuracy on unseen testing data: {:.3f}%".format(test_accuracy*100))
+            current_return = money_wfees_naive_array[-1]
+            total_return += current_return
+
+            if current_return < 1000:
+                lost_count += 1
+            if current_return < worst_return:
+                worst_return = current_return
+            if current_return > best_return:
+                best_return = current_return
+
+            plt.plot(money_wfees_naive_array)
+            #plt.plot(money_wfees_naive_array, label = "Run {} /w fees, accuracy {:.3f}, optimal threshold from different test set".format(i, test_accuracy))
+
+            # Now simulate without using non-optimal threshold
+            money_wfees_naive_array_noth, correct_noth, incorrect_noth = TradingSimulation(final_test, combined_prediction_array[i], optimal_thresholds[i], False)
+
+            test_accuracy_noth = correct_noth / (correct_noth + incorrect_noth)
+            running_accuracy_noth += test_accuracy_noth
+            current_return_noth = money_wfees_naive_array_noth[-1]
+            total_return_noth += current_return_noth
+
+            plt.plot(money_wfees_naive_array_noth, ':')
+            #plt.plot(money_wfees_naive_array_noth, ':', label = "Run {} /w fees, accuracy {:.3f}, default threshold = 0.5".format(i, test_accuracy_noth))
+
+            plt.xlabel("Day")
+            plt.ylabel("Equity")
+
+        average_return = total_return / iterations 
+        average_return_noth = total_return_noth / iterations
+        average_accuracy = running_accuracy / iterations
+        average_accuracy_noth = running_accuracy_noth / iterations
+        return_range = best_return - worst_return
+        accuracy_range = best_accuracy - worst_accuracy
+        print("Average return {:.3f}".format(average_return))
+        print("Average accuracy on unseen testing data: {:.3f}%".format(average_accuracy*100))
+        print("Runs that made negative ROI {}".format(lost_count))
+        print("Average precision/recall/f1 score {}/{}/{}".format(precision, recall, f1))
+        print("Average accuracy using 0.5 threshold {}".format(average_accuracy_noth))
+        print("Average return using 0.5 threshold {:.3f}".format(average_return_noth))
+        plt.legend()
+        plt.show()
+
+        combination_metrics = combination_metrics.append({"Average AUC": average_auc, "Best AUC": best_auc, "Average Return": average_return, "Average Accuracy": average_accuracy, "Lost Money Count": lost_count, "Best Return": best_return, "Worst Return": worst_return, "Best Accuracy": best_accuracy, "Worst Accuracy": worst_accuracy, "Average Return NOTH": average_return_noth, "Average Accuracy NOTH": average_accuracy_noth, "Average Precision": precision, "Average Recall": recall, "Average F1": f1}, ignore_index=True)
+        combination_metrics.to_csv("combination_metrics_using_new_thresholds.csv")
+        combination_counter += 1
+
+#------------------- Non-interpolation/forwardfill
+
+def LoadDailyData():
+    # Import BTC OHLCV dataset, FNG dataset, 52-week new high/low ratio. Convert all date columns into the same datetime datatype
+    BTC_df, labels = CreateLabels()
+
+    FNG_df = pd.read_csv("FNG_Daily.csv") #From alternative.me
+    FNG_df['date'] = pd.to_datetime(FNG_df['date'])
+
+    # Merge datasets on date column
+    Combined_df = pd.merge(BTC_df, FNG_df, on = 'date')
+
+    # Drop some unused columns and rename for convenience ---- Maybe keep day? Some evidence that fridays have more positive markets than monday --- For later, ask Yu
+    Combined_df = Combined_df.drop(['unix', 'symbol', 'volume BTC', 'tradecount', 'fng_classification'], axis = 1)
+    Combined_df = Combined_df.rename(columns = {'volume USDT': 'volume'})
+    Combined_df['label'] = labels
+
+    Combined_df = Combined_df[::-1]
+    Combined_df.to_csv('Combined_Daily_Only.csv', index=False)
 
 
-    fpr, tpr, thresholds = roc_curve(test_labels, test_predictions_positive)
-    roc_auc = auc(fpr, tpr)
-    if roc_auc > best_auc:
-        best_auc = roc_auc
-        best_test_predictions_positive = test_predictions_positive
-        best_test_predictions_negative = test_predictions_negative
-        #best_accuracy = history.history['accuracy']
-        #best_accuracy_validation = history.history['val_accuracy']
-        #best_loss = history.history['loss']
-        #best_loss_validation = history.history['val_loss']
-    auc_sum += roc_auc
-    accuracies.append(history.history['accuracy'])
-    val_accuracies.append(history.history['val_accuracy'])
-    losses.append(history.history['loss'])
-    val_losses.append(history.history['val_loss'])
+def CPICountdown(df):
 
-    plt.plot(fpr, tpr, label = 'Model (area = {:.3f})'.format(roc_auc))
+    # find the non-NaN values in the column
+    non_na_values = df['CPI'].notna()
 
-print("Best AUC: {:.3f}".format(best_auc))
+    # get the dates at which non-NaN values appear
+    dates = df.loc[non_na_values]
+    dates = dates['date']
+    dates= pd.to_datetime(dates)
 
-plt.plot([0,1], [0,1], 'k--', label = "No predictive power (area = 0.5)")
-plt.xlabel('False Positive Rate')
-plt.ylabel('True Positive Rate')
-plt.title('ROC Curve     average AUC = {:.3f}'.format(auc_sum/iterations))
-plt.legend(loc = 'best')
-plt.show()
+    dates = dates.reset_index()
+    dates = dates.drop('index', axis=1)
+    df['CPI_countdown'] = np.nan
+    date_counter = 0
 
-epoch_list = np.arange(0, epochs, 1, dtype=int)
+    for i in range(len(df)):
+        if df.loc[i, 'date'] < dates.loc[date_counter, 'date']:
+            df.loc[i, 'CPI_countdown'] = (dates.loc[date_counter, 'date'] - df.loc[i, 'date']).days
+        elif df.loc[i, 'date'] == dates.loc[date_counter, 'date']:
+            df.loc[i, 'CPI_countdown'] = 0
+            date_counter += 1
 
-count = 0
-best_accuracy = []
-for accuracy in accuracies:
-    if accuracy == best_accuracy:
-        plt.plot(epoch_list, accuracy, color = "black", label = "Highest AUC Accuracy")
-        plt.plot(epoch_list, val_accuracies[count], color = "green", label = "Highest AUC Validation Accuracy")
-    else:
-        plt.plot(epoch_list, accuracy, color = "blue")
-        plt.plot(epoch_list, val_accuracies[count], color = "red")
-    count += 1
+    df['CPI'] = df['CPI'].ffill()
 
-plt.xlabel("Epoch")
-plt.ylabel("Accuracy")
-plt.title("Training (blue) and Validation (red) accuracy")
-plt.show()
+    return df
 
-count = 0
-for loss in losses:
-    plt.plot(epoch_list, loss, color = "blue")
-    plt.plot(epoch_list, val_losses[count], color = "red")
-    count += 1
 
-plt.xlabel("Epoch")
-plt.ylabel("Loss")
-plt.title("Training (blue) and Validation (red) loss")
-plt.show()
+def CountdownLSTM(r_features):
+
+    LoadDailyData()
+
+    from sklearn.preprocessing import MinMaxScaler
+
+    # Load the data
+    df = pd.read_csv('Combined_Daily_Only.csv')
+    df_cpi = pd.read_csv('CPIU_Monthly.csv')
+    df_fed = pd.read_csv('FEDFunds.csv')
+
+    # Convert the date columns to datetime format
+    df['date'] = pd.to_datetime(df['date'])
+    df_cpi['date'] = pd.to_datetime(df_cpi['date'])
+    df_fed['date'] = pd.to_datetime(df_fed['date'])
+
+    # Merge the CPI and FEDFunds data with the daily Bitcoin data
+    df = pd.merge(df, df_cpi, on='date', how='left')
+    df = pd.merge(df, df_fed, on='date', how='left')
+
+    df = CPICountdown(df)
+    df['fundrate'] = df['fundrate'].ffill()
+    df = df.drop('month', axis = 1)
+
+    df.to_csv("Countdown_Combined.csv")
+
+    # Select the relevant columns for training the LSTM model
+    cols = ['open', 'high', 'low', 'close', 'volume', 'fng_value', 'CPI', 'fundrate', 'CPI_countdown','label']
+    df = df[cols]
+
+    days_to_use_array = [7, 15, 28, 45, 80]
+    LSTM_cells_array = [32, 64, 128, 256, 512]
+    dropout_array = [0.2, 0.3, 0.4, 0.5]
+    epochs_array = [40, 80, 120, 160]
+    batch_size_array = [16, 32, 64, 128]
+
+    hp_combinations = list(itertools.product(batch_size_array, epochs_array, dropout_array, LSTM_cells_array, days_to_use_array))
+
+    hp_combinations_df = pd.DataFrame(hp_combinations, columns = ["Batch Size", "Epochs", "Dropout Rate", "LSTM Cells", "Days to Use"])
+    hp_combinations_df.to_csv("hp_combinations.csv")
+
+    # Print the number of hyperparameter combinations
+    print(f"Total number of hyperparameter combinations: {len(hp_combinations)}")
+
+    # Print the first 10 hyperparameter combinations
+    print("First 10 hyperparameter combinations:")
+    for combination in hp_combinations[:10]:
+        print(combination)
+
+    combination_metrics = pd.DataFrame(columns=["Average AUC", "Best AUC", "Average Return", "Average Accuracy", "Lost Money Count", "Best Return", "Worst Return", "Best Accuracy", "Worst Accuracy", "Return Range", "Accuracy Range"])
+
+    iterations = 1
+    combination_counter = 0
+
+    hp_combinations = [[8,80,0.2,128,28]]
+
+    for combination in hp_combinations:
+
+        print("--------------------------")
+        print("{} COMBINATION OUT OF {}".format(combination_counter, len(hp_combinations)))
+        print("--------------------------")
+        print("COMBINATION DETAILS:")
+        print("--------------------------")
+        print(combination)
+        print("--------------------------")
+
+        train_X, train_labels, test_labels, final_test_labels, scaled_train, scaled_test, scaled_final_test, test, final_test = PrepareDataForModel(Combined_df=df, days_to_use=combination[4], label_index=9 - len(r_features), remove_labels=False)
+
+        average_auc, best_auc, combined_prediction_array, accuracies, val_accuracies, losses, val_losses, optimal_thresholds, precision, recall, f1 = TrainModel(train_X=train_X,
+                                                                                                                                    train_labels=train_labels,
+                                                                                                                                    test_labels=test_labels,
+                                                                                                                                    final_test_labels=final_test_labels,
+                                                                                                                                    scaled_train=scaled_train,
+                                                                                                                                    scaled_test=scaled_test,
+                                                                                                                                    scaled_final_test=scaled_final_test, 
+                                                                                                                                    batch_size=combination[0],
+                                                                                                                                    epochs=combination[1],
+                                                                                                                                    dropout_rate=combination[2],
+                                                                                                                                    LSTM_cells=combination[3],
+                                                                                                                                    iterations=iterations)
+
+        PlotModelIterations(average_auc=average_auc, best_auc=best_auc, accuracies=accuracies, val_accuracies=val_accuracies, losses=losses, val_losses=val_losses, epochs=combination[1])
+
+        total_return = 0
+        lost_count = 0
+        running_accuracy = 0
+        running_accuracy_noth = 0
+        total_return_noth = 0
+        best_return = 0
+        best_accuracy = 0
+        worst_return = 100000000000000
+        worst_accuracy = 100
+
+        for i in range(iterations):
+            money_wfees_naive_array, correct, incorrect = TradingSimulation(final_test, combined_prediction_array[i], optimal_thresholds[i], True)
+            test_accuracy = correct / (correct + incorrect)
+            running_accuracy += test_accuracy
+
+            if test_accuracy < worst_accuracy:
+                worst_accuracy = test_accuracy
+            if test_accuracy > best_accuracy:
+                best_accuracy = test_accuracy
+
+            #print("Accuracy on unseen testing data: {:.3f}%".format(test_accuracy*100))
+            current_return = money_wfees_naive_array[-1]
+            total_return += current_return
+
+            if current_return < 1000:
+                lost_count += 1
+            if current_return < worst_return:
+                worst_return = current_return
+            if current_return > best_return:
+                best_return = current_return
+
+            plt.plot(money_wfees_naive_array, label = "Run {} /w fees, accuracy {:.3f}, optimal threshold for different test set".format(i, test_accuracy))
+
+            money_wfees_naive_array_noth, correct_noth, incorrect_noth = TradingSimulation(final_test, combined_prediction_array[i], optimal_thresholds[i], False)
+
+            test_accuracy_noth = correct_noth / (correct_noth + incorrect_noth)
+            running_accuracy_noth += test_accuracy_noth
+            current_return_noth = money_wfees_naive_array_noth[-1]
+            total_return_noth += current_return_noth
+
+            plt.plot(money_wfees_naive_array_noth, ':', label = "Run {} /w fees, accuracy {:.3f}, threshold = 0.5".format(i, test_accuracy_noth))
+
+
+            plt.xlabel("Day")
+            plt.ylabel("Equity")
+
+        average_return = total_return / iterations 
+        average_return_noth = total_return_noth / iterations
+        average_accuracy = running_accuracy / iterations
+        average_accuracy_noth = running_accuracy_noth / iterations
+        return_range = best_return - worst_return
+        accuracy_range = best_accuracy - worst_accuracy
+        print("Average return {:.3f}".format(average_return))
+        print("Average accuracy on unseen testing data: {:.3f}%".format(average_accuracy*100))
+        print("Runs that made negative ROI {}".format(lost_count))
+        print("Average precision/recall/f1 score {}/{}/{}".format(precision, recall, f1))
+        print("Average accuracy using 0.5 threshold {}".format(average_accuracy_noth))
+        print("Average return using 0.5 threshold {:.3f}".format(average_return_noth))
+        plt.legend()
+        plt.show()
+
+        combination_metrics = combination_metrics.append({"Average AUC": average_auc, "Best AUC": best_auc, "Average Return": average_return, "Average Accuracy": average_accuracy, "Lost Money Count": lost_count, "Best Return": best_return, "Worst Return": worst_return, "Best Accuracy": best_accuracy, "Worst Accuracy": worst_accuracy, "Average Precision": precision, "Average Recall": recall, "Average F1": f1}, ignore_index=True)
+        combination_metrics.to_csv("combination_metrics_using_new_thresholds.csv")
+        combination_counter += 1
+
+
+#CountdownLSTM([])
+LSTMSolution([])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #test_predictions = []
 #first_eval_batch = scaled_train[-n_size:]
@@ -441,89 +1051,6 @@ plt.show()
 # print("True negative rate: " + str(true_negative_rate))
 # print("False negative rate: " + str(false_negative_rate))
 
-count = 0
-cum_inaccuracy = 0
-overestimations = 0
-cum_overestimation_inaccuracy = 0
-underestimations = 0
-cum_underestimation_inaccuracy = 0
-cum_prediction_change = 0
-leverage = 1
-
-money_wfees_naive = 1000
-money_wfees_naive_array = []
-money_naive = 1000
-money_naive_array = []
-money_wfees_smart = 1000
-money_wfees_smart_array = []
-money_smart = 1000
-money_smart_array = []
-correct = 0
-incorrect = 0
-
-cum_price_change = 0
-trades_executed_naive = 0
-difference_threshold = 0.005
-taker_fee = 0.0005
-maker_fee = 0.0005
-
-#Convert strings from test into np.float64
-test = test.astype(np.float64)
-
-#Do simulation of trading
-for i in test['close']:
-  if count > 0:
-    trades_executed_naive += 1
-    # If last close is less than the prediction
-    if best_test_predictions_positive[count] > 0.5:
-      # Would have longed
-      print("Longing at index " + str(count))
-      percent_change = i/test['close'].iloc[count-1]
-      if percent_change >= 1:
-        correct += 1
-      else:
-        incorrect += 1
-      amplified_change = 1 + ((percent_change - 1) * leverage)
-      print("Last close: {:.3f}     Current Close: {:.3f}       % Change: {:.3f}".format(test['close'].iloc[count-1], i, amplified_change))
-      # No mathematical need to seperate multiplication with brackets, but makes it more readable
-      money_wfees_naive = money_wfees_naive - (money_wfees_naive * (taker_fee * leverage))
-      money_wfees_naive = money_wfees_naive - (money_wfees_naive * (maker_fee * leverage))
-      money_wfees_naive = money_wfees_naive * amplified_change
-      money_naive = money_naive * amplified_change
-      # Non-naive strategy - if the change is equal or greater than difference_threshold, long
-    #   if test['close'].iloc[count-1] <= true_predictions[count]*(1-difference_threshold):
-    #     money_wfees_smart = money_wfees_smart - (money_wfees_smart * (taker_fee * leverage))
-    #     money_wfees_smart = money_wfees_smart - (money_wfees_smart * (maker_fee * leverage))
-    #     money_wfees_smart = money_wfees_smart * amplified_change
-    #     money_smart = money_smart * amplified_change
-    # Else if last close is more than the prediction
-    elif best_test_predictions_negative[count] > 0.5:
-      # Would have shorted
-      print("Shorting at index " + str(count))
-      percent_change = test['close'].iloc[count-1]/i
-      if percent_change >= 1:
-        correct += 1
-      else:
-        incorrect += 1
-      amplified_change = 1 + ((percent_change - 1) * leverage)
-      print("Last close: {:.3f}     Current Close: {:.3f}       % Change: {:.3f}".format(test['close'].iloc[count-1], i, amplified_change))
-      # No mathematical need to seperate multiplication with brackets, but makes it more readable
-      money_wfees_naive = money_wfees_naive - (money_wfees_naive * (maker_fee * leverage))
-      money_wfees_naive = money_wfees_naive - (money_wfees_naive * (taker_fee * leverage))
-      money_wfees_naive = money_wfees_naive * amplified_change
-      money_naive = money_naive * amplified_change
-      # Non-naive strategy - if the change is equal or greater than difference_threshold, short
-    #   if test['close'].iloc[count-1]*(1-difference_threshold) > true_predictions[count]: 
-    #     money_wfees_smart = money_wfees_smart - (money_wfees_smart * (maker_fee * leverage))
-    #     money_wfees_smart = money_wfees_smart - (money_wfees_smart * (taker_fee * leverage))
-    #     money_wfees_smart = money_wfees_smart * amplified_change
-    #     money_smart = money_smart * amplified_change
-    money_wfees_naive_array.append(money_wfees_naive)
-    money_naive_array.append(money_naive)
-    # money_wfees_smart_array.append(money_wfees_smart)
-    # money_smart_array.append(money_smart)
-  count += 1
-
 # prediction_change = cum_prediction_change / (count-1)
 # price_change = cum_price_change / (count-1)
 # inaccuracy = cum_inaccuracy / count
@@ -550,18 +1077,9 @@ for i in test['close']:
 # print("Money after trading not including fees using smart strategy: " + str(money_smart))
 # print("Elapsed days: " + str(count))
 
-plt.plot(money_naive_array, label = "Without Fees")
-plt.plot(money_wfees_naive_array, label = "With Fees")
-plt.xlabel("Day")
-plt.ylabel("Equity")
+#plt.plot(money_naive_array, label = "Without Fees")
 # plt.plot(money_smart_array, label = "smart no fees")
 # plt.plot(money_wfees_smart_array, label = "smart fees")
-plt.legend()
-plt.show()
-
-
-test_accuracy = correct / (correct + incorrect)
-print("Accuracy on unseen testing data: {:.3f}".format(test_accuracy))
 
 #days_to_predict = 1
 #days_to_use = 30
